@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pmidfrag"
+version = "0.1.0"
+description = "Single-publication dependence and evidence-type audits for GO over-representation analysis"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = ["numpy>=1.26", "scipy>=1.11"]
+
+[project.scripts]
+pmidfrag = "pmidfrag.cli:main"
+
+[tool.setuptools]
+packages = ["pmidfrag"]

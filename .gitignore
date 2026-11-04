@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+examples/airway/go_2026-06-19/
+examples/airway/out_up/
