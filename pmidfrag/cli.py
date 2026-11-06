@@ -1,6 +1,6 @@
 """pmidfrag: single-publication dependence and evidence-type audits for GO over-representation analysis.
 
-Inputs: a GAF (2.1/2.2), a GO JSON ontology (go-basic.json[.gz]), a background gene list, a query gene list,
+Inputs: a GAF (2.0-2.2; an empty 2.0/2.1 qualifier is read as involved_in), a GO JSON ontology (go-basic.json[.gz]), a background gene list, a query gene list,
 and (unless genes are the GAF object identifiers themselves) a two-column mapping TSV `accession<TAB>gene`.
 Outputs: per-term CSV with q, the supporting PMIDs, query hits without PMID support, single-publication
 dependence (killer PMIDs split into direct and BH-only), fragility index with its status, evidence
@@ -30,7 +30,7 @@ def read_list(p):
     return [l.strip() for l in Path(p).read_text(encoding='utf-8').splitlines() if l.strip() and not l.startswith('#')]
 
 def load_p2g(mapping, background):
-    """accession -> gene, keeping only accessions that map to exactly one background gene."""
+    """accession -> gene, keeping only accessions that the table maps to exactly one gene, if that gene is in the background."""
     bg = set(background)
     if mapping is None:
         return {g: g for g in bg}
@@ -95,6 +95,14 @@ def run(args):
     K = hit_counts(closed, bg, ti)
     family = [t for t in allterms if t != 'GO:0008150' and args.min_size <= K[ti[t]] <= args.max_size]
     query = sorted(set(query_in) & bg); unmapped = sorted(set(query_in) - bg)
+    if not family:
+        print('pmidfrag: no GO term has %d-%d background hits (%d accepted GAF rows; row reasons: %s)'
+              % (args.min_size, args.max_size, len(rows), json.dumps(ledger_qc['reason_counts'])), file=sys.stderr)
+        return 2
+    if not query:
+        print('pmidfrag: none of the %d query genes is in the background (%d background genes after mapping)'
+              % (len(query_in), len(bg)), file=sys.stderr)
+        return 2
     engine = FragilityEngine(rows, bg, ont.ancestors, family)
     res = engine.evaluate(query, args.alpha, source_sink=lambda *_: None)
     base = res['baseline']; sig = res['baseline_significant_indices']; qs = engine.query_set(query)
@@ -140,9 +148,14 @@ def run(args):
         for i, t in enumerate(family): w.writerow([t, ont.names.get(t, t), int(base['K'][i]), int(base['k'][i]), float(base['p'][i]), float(base['q'][i]), float(E['q'][i])])
     summary = {'tool': 'pmidfrag', 'version': __version__,
                'inputs': {'gaf': str(args.gaf), 'gaf_sha256': sha256(args.gaf), 'ontology': str(args.ontology),
-               'ontology_sha256': sha256(args.ontology), 'background_genes': len(background), 'background_used': len(bg),
+               'ontology_sha256': sha256(args.ontology), 'background_sha256': sha256(args.background),
+               'query_sha256': sha256(args.query), 'mapping': args.mapping,
+               'mapping_sha256': sha256(args.mapping) if args.mapping else None,
+               'background_genes': len(background), 'background_used': len(bg),
                'query_genes': len(query_in), 'query_used': len(query), 'query_unmapped': unmapped,
-               'relations': args.relations.split(','), 'db': args.db, 'taxon': args.taxon, 'family_size_bounds': [args.min_size, args.max_size], 'alpha': args.alpha},
+               'relations': args.relations.split(','), 'db': args.db, 'taxon': args.taxon, 'entity': args.entity,
+               'propagation': 'is_a' if args.no_part_of else 'is_a+part_of',
+               'family_size_bounds': [args.min_size, args.max_size], 'alpha': args.alpha},
                'ledger_qc': ledger_qc, 'family_size': len(family), 'candidate_pmids': res['candidate_count'],
                'query_rows_without_pmid': res['query_accepted_rows_without_pmid'],
                'significant_terms': len(sig), 'single_pmid_dependent_terms': int(res['fragile1_count']),

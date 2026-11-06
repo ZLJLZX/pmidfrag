@@ -24,8 +24,14 @@ def sha256(path: str | Path) -> str:
     return h.hexdigest()
 
 
-def classify(z: list[str], p2g: dict[str, str], ontology, relations: set[str], db: str = 'UniProtKB', taxon: str = '9606', entity: str = 'protein'):
-    """Return (reason, normalized row); exactly one terminal reason per GAF row."""
+def classify(z: list[str], p2g: dict[str, str], ontology, relations: set[str], db: str = 'UniProtKB', taxon: str = '9606',
+             entity: str = 'protein', empty_qualifier_as: str | None = None):
+    """Return (reason, normalized row); exactly one terminal reason per GAF row.
+
+    empty_qualifier_as: relation assigned to a row whose qualifier column is empty. GAF 2.0/2.1 leave the
+    qualifier of a positive annotation empty (build_ledger passes 'involved_in' for those files); GAF 2.2
+    requires a relation, so None keeps an empty qualifier as 'other_relation'.
+    """
     if len(z) != 17: return 'malformed_column_count', None
     if z[0] != db: return 'other_db', None
     if z[8] != 'P': return 'not_BP', None
@@ -33,6 +39,7 @@ def classify(z: list[str], p2g: dict[str, str], ontology, relations: set[str], d
     if entity and z[11] != entity: return 'other_entity', None
     q = set(z[3].split('|'))
     if 'NOT' in q: return 'NOT', None
+    if q == {''} and empty_qualifier_as: q = {empty_qualifier_as}
     if len(q) != 1 or not q <= relations: return 'other_relation', None
     if z[6] == 'ND': return 'ND', None
     if z[15]: return 'annotation_extension', None
@@ -57,16 +64,20 @@ def build_ledger(gaf: str | Path, p2g: dict[str, str], ontology,
     out.parent.mkdir(parents=True, exist_ok=True)
     opener = gzip.open if str(gaf).endswith('.gz') else open
     accepted = []; reasons = Counter(); evidence = Counter(); header = []
-    nonblank = 0
+    nonblank = 0; version = None; empty_as = None
     with opener(gaf, 'rb') as f, gzip.open(out, 'wt', encoding='utf-8', newline='\n') as w:
         for line_number, raw in enumerate(f, 1):
             text = raw.decode('utf-8').rstrip('\r\n')
             if text.startswith('!'):
-                header.append({'line': line_number, 'text': text}); continue
+                header.append({'line': line_number, 'text': text})
+                m = re.match(r'!\s*gaf-version:\s*(\S+)', text)
+                if m and version is None:
+                    version = m.group(1); empty_as = 'involved_in' if version in ('2.0', '2.1') else None
+                continue
             if not text.strip(): continue
             nonblank += 1
             fields = text.split('\t')
-            reason, norm = classify(fields, p2g, ontology, set(relations), db, taxon, entity)
+            reason, norm = classify(fields, p2g, ontology, set(relations), db, taxon, entity, empty_as)
             digest = hashlib.sha256(raw).hexdigest()
             row_id = f'{line_number}:{digest}'
             row = {'row_id': row_id, 'line_number': line_number,
@@ -78,7 +89,8 @@ def build_ledger(gaf: str | Path, p2g: dict[str, str], ontology,
                 item = {'row_id': row_id, 'line_number': line_number, **norm}
                 accepted.append(item); evidence[norm['evidence']] += 1
     if sum(reasons.values()) != nonblank: raise AssertionError('Row ledger does not balance')
-    summary = {'input_sha256': sha256(gaf), 'input_rows': nonblank,
+    summary = {'input_sha256': sha256(gaf), 'gaf_version': version, 'empty_qualifier_read_as': empty_as,
+               'input_rows': nonblank,
                'reason_counts': dict(sorted(reasons.items())),
                'accepted_evidence_counts': dict(sorted(evidence.items())),
                'accepted_rows': len(accepted), 'headers': header,

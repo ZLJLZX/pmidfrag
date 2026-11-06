@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: "pmidfrag: publication-level provenance audits for Gene Ontology over-representation analysis"
-version: 0.1.1
+version: 0.1.2
 date-released: 2026-11-06
 license: MIT
 repository-code: "https://github.com/ZLJLZX/pmidfrag"

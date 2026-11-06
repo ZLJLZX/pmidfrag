@@ -17,12 +17,12 @@ def write_ontology(path, n_terms=5):
 def gaf_row(prot, term, ref, ev='IDA'):
     return '\t'.join(['UniProtKB', prot, prot, 'involved_in', term, ref, ev, '', 'P', prot, '', 'protein', 'taxon:9606', '20200101', 'UniProt', '', ''])
 
-def run_cli(tmp_path, genes, query, rows, label='out', drop_refs=()):
+def run_cli(tmp_path, genes, query, rows, label='out', drop_refs=(), version='2.2'):
     """Run the CLI; drop_refs removes GAF rows citing those references (independent route for checks)."""
     onto = tmp_path/'go.json'
     if not onto.exists(): write_ontology(onto)
     kept = [r for r in rows if r.split('\t')[5] not in set(drop_refs)]
-    gaf = tmp_path/f'{label}.gaf'; gaf.write_text('!gaf-version: 2.2\n' + '\n'.join(kept) + '\n')
+    gaf = tmp_path/f'{label}.gaf'; gaf.write_text(f'!gaf-version: {version}\n' + '\n'.join(kept) + '\n')
     (tmp_path/'bg.txt').write_text('\n'.join(genes)); (tmp_path/'q.txt').write_text('\n'.join(query))
     out = tmp_path/label
     assert main(['--gaf', str(gaf), '--ontology', str(onto), '--background', str(tmp_path/'bg.txt'), '--query', str(tmp_path/'q.txt'),
@@ -124,3 +124,42 @@ def test_fi_status_and_hits_without_pmid(tmp_path):
     for drop, lost in ((['PMID:200', 'PMID:201'], True), (['PMID:200'], False), (['PMID:201'], False)):
         _, after, _ = run_cli(tmp_path, genes, query, rows, label='drop_' + '_'.join(d[5:] for d in drop), drop_refs=drop)
         assert (float(after['GO:0000003']['q']) > 0.05) == lost
+
+def without_qualifier(rows):
+    return ['\t'.join(z[:3] + [''] + z[4:]) for z in (r.split('\t') for r in rows)]
+
+def test_gaf21_empty_qualifier_and_input_errors(tmp_path):
+    """GAF 2.1 leaves the qualifier of positive annotations empty: the same rows must give the same result as
+    GAF 2.2 rows with involved_in. Negative control: an empty qualifier in a GAF 2.2 file is not accepted.
+    A query with no background gene and an empty term family exit with code 2 and a message, not a traceback."""
+    genes = [f'G{i}' for i in range(60)]; query = genes[:10]; rows = []
+    for g in query[:5]: rows.append(gaf_row(g, 'GO:0000001', 'PMID:1'))
+    rows.append(gaf_row(query[5], 'GO:0000001', 'PMID:2'))
+    for g in genes[20:24]: rows.append(gaf_row(g, 'GO:0000001', 'PMID:3'))
+    for j, g in enumerate(query[:6]): rows.append(gaf_row(g, 'GO:0000002', f'PMID:{100+j}'))
+    for g in genes[30:34]: rows.append(gaf_row(g, 'GO:0000002', 'PMID:200'))
+    for g in genes[50:56]: rows.append(gaf_row(g, 'GO:0000004', 'PMID:301'))
+    t22, a22, o22 = run_cli(tmp_path, genes, query, rows, label='v22')
+    t21, a21, o21 = run_cli(tmp_path, genes, query, without_qualifier(rows), label='v21', version='2.1')
+    assert t21.keys() == t22.keys() and len(t22) >= 1
+    for term in t22:
+        for col in ('q', 'k', 'K', 'support_pmids', 'killer_pmids', 'fragility_index', 'fi_status'):
+            assert t21[term][col] == t22[term][col], (term, col)
+    assert a21 == a22
+    qc21 = json.loads((o21/'summary.json').read_text())['ledger_qc']
+    qc22 = json.loads((o22/'summary.json').read_text())['ledger_qc']
+    assert qc21['gaf_version'] == '2.1' and qc21['empty_qualifier_read_as'] == 'involved_in'
+    assert qc22['gaf_version'] == '2.2' and qc22['empty_qualifier_read_as'] is None
+    assert qc21['accepted_rows'] == qc22['accepted_rows'] == len(rows)
+    onto = tmp_path/'go.json'
+    (tmp_path/'bg.txt').write_text('\n'.join(genes)); (tmp_path/'q.txt').write_text('\n'.join(query))
+    (tmp_path/'none.txt').write_text('X1\nX2\n')
+    bad = tmp_path/'bad22.gaf'; bad.write_text('!gaf-version: 2.2\n' + '\n'.join(without_qualifier(rows)) + '\n')
+    def rc(gaf, q, label):
+        return main(['--gaf', str(gaf), '--ontology', str(onto), '--background', str(tmp_path/'bg.txt'),
+                     '--query', str(q), '--out', str(tmp_path/label), '--min-size', '3'])
+    assert rc(bad, tmp_path/'q.txt', 'bad22') == 2                       # empty family: nothing accepted
+    assert rc(tmp_path/'v22.gaf', tmp_path/'none.txt', 'noquery') == 2   # no query gene in the background
+    summ = json.loads((o22/'summary.json').read_text())['inputs']
+    assert summ['propagation'] == 'is_a+part_of' and summ['entity'] == 'protein'
+    assert len(summ['background_sha256']) == len(summ['query_sha256']) == 64 and summ['mapping_sha256'] is None

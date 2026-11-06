@@ -47,12 +47,16 @@ pmidfrag --gaf HUMAN-uniprot.gaf.gz --ontology go-basic.json \
 
 - `--background`: one gene id per line, the measured genes (never the whole genome).
 - `--query`: gene ids, subset of the background.
-- `--mapping`: `accession<TAB>gene` TSV (e.g. UniProt -> Ensembl/Entrez). Accessions mapping to more than one
-  background gene are dropped. Omit when the gene ids are the GAF object ids themselves (e.g. `--db SGD` with SGD ids).
+- `--mapping`: `accession<TAB>gene` TSV (e.g. UniProt -> Ensembl/Entrez). Accessions that the table maps to more
+  than one gene, or to a gene outside the background, are dropped. Omit when the gene ids are the GAF object ids
+  themselves (e.g. `--db SGD` with SGD ids).
 - `--db`, `--taxon`, `--entity`: GAF filters (defaults `UniProtKB`, `9606`, `protein`).
 - Projection: biological process, positive qualifiers (`involved_in` and `acts_upstream_of*`), `is_a` + `part_of`
   propagation, NOT/ND/extension rows excluded, family = terms with 5-500 background hits. Change with `--relations`,
   `--no-part-of`, `--min-size`, `--max-size`.
+- GAF versions: 2.2, and 2.0/2.1, whose positive annotations have an empty qualifier; there an empty qualifier is
+  read as `involved_in` (the version is taken from the `!gaf-version` header and recorded in `summary.json`).
+- The run stops with exit code 2 and a message if no query gene is in the background or no term is in the family.
 
 Outputs: `significant_terms.csv`, `all_terms.csv.gz`, `summary.json` (with input SHA-256 and QC ledger), `report.html`,
 `ledger.jsonl.gz` (every GAF row with its inclusion or exclusion reason, evidence code and references).
@@ -72,6 +76,10 @@ bash examples/airway/run_airway.sh      # real-data regression (downloads ~83 MB
 
 ## Changes
 
+- 0.1.2: GAF 2.0/2.1 input is read (0.1.1 rejected their empty qualifiers and stopped with an error); exit code 2
+  with a message for a query outside the background or an empty term family; `summary.json` also records the
+  SHA-256 values of the background, query and mapping files, the entity and propagation settings and the GAF
+  version. Results for GAF 2.2 input are unchanged (airway regression).
 - 0.1.1: per-term supporting-PMID lists and hits without PMID support; killer PMIDs split into direct and BH-only;
   `fi_status` for every fragility index; FI threshold follows `--alpha`; more tests; study-specific helpers removed.
   Significance, dependence flags, killer PMIDs and fragility-index values are unchanged from 0.1.0 at the default
