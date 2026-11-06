@@ -3,8 +3,10 @@
 Usage: python examples/airway/check_regression.py <pmidfrag out dir> [expected_terms_up.csv.gz] [--tamper]
 
 Checks every term of the fixed family (K, k, q, q without IEP/HEP to 1e-12) and every significant
-term (dependence flag, killer PMIDs, support count, rank). --tamper perturbs one reference q value
-before comparing; the check must then FAIL (negative control). Exit 0 = PASS, 1 = FAIL.
+term (dependence flag, killer PMIDs, support count, rank), plus the internal consistency of the per-term
+columns (supporting-PMID list vs count, direct + BH-only killers = all killers, FI status vs FI value).
+--tamper perturbs one reference q value before comparing; the check must then FAIL (negative control).
+Exit 0 = PASS, 1 = FAIL.
 """
 import csv
 import gzip
@@ -49,8 +51,17 @@ def main(argv):
             bad.append("%s dependence flag" % t)
         if set(filter(None, a["killer_pmids"].split(";"))) != set(json.loads(b["killer_pmids"])):
             bad.append("%s killer PMIDs" % t)
-        if int(a["support_pmids"]) != int(b["support_pmids"]):
+        if int(a["n_support_pmids"]) != int(b["support_pmids"]):
             bad.append("%s support" % t)
+        if len(set(filter(None, a["support_pmids"].split(";")))) != int(a["n_support_pmids"]):
+            bad.append("%s support list vs count" % t)
+        split = [set(filter(None, a[c].split(";"))) for c in ("killer_pmids", "killer_pmids_direct", "killer_pmids_via_bh")]
+        if split[0] != split[1] | split[2] or split[1] & split[2]:
+            bad.append("%s killer split" % t)
+        fi, st = a["fragility_index"], a["fi_status"]
+        if not ((fi in ("1", "2") and st == "exact") or (fi in ("3", "4", "5") and st == "upper_bound")
+                or (fi == "" and st.startswith("not_abolished"))):
+            bad.append("%s FI %r with status %r" % (t, fi, st))
         if int(a["rank"]) != int(b["significant_rank"]):
             bad.append("%s rank" % t)
     print("[check] family terms compared: %d; significant terms compared: %d" % (len(set(ref) & set(got)), len(ref_sig & set(sig))))

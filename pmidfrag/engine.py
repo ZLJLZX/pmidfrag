@@ -1,4 +1,4 @@
-"""E4 PLAN + amendments 1/2, implemented without species-specific data selection.
+"""Exact single-publication deletion for fixed-family GO over-representation analysis.
 
 Accepted rows, background, query, ancestor table and fixed family are explicit
 inputs. A PMID deletion removes rows from the ENTIRE background. Non-query-only
@@ -6,7 +6,7 @@ sources cannot increase any overrepresentation p value, or any fixed-family BH
 q value, and thus cannot kill a baseline-significant term.
 """
 from __future__ import annotations
-from collections import Counter, defaultdict
+from collections import defaultdict
 import re
 from typing import Callable
 import numpy as np
@@ -15,89 +15,10 @@ from .core import bh, tail
 from .ledger import EXPRESSION_CODES
 
 PMID = re.compile(r'PMID:[0-9]+', re.ASCII)
-PRIMARY_SEED = 20261102
-PRIMARY_REPLICATES = 200
-HEP_SOURCE = 'PMID:22926577'
-HEP_TERM = 'GO:0021762'
 
 
 def pmids(references):
     return frozenset(x for x in references if isinstance(x, str) and PMID.fullmatch(x))
-
-
-def primary_control_plan(records, background, repetitions=PRIMARY_REPLICATES,
-                         seed=PRIMARY_SEED):
-    """A3: one RNG across replicate-major, lexicographic-gene traversal.
-
-    Within a gene, rows retain accepted-ledger order. A shortage removes ALL
-    eligible nonexpression rows, records the deficit, and does not consume RNG
-    draws. At equality, choice(..., replace=False) is called as for sufficient
-    pools. IDs are sorted only for serialization, AFTER sampling.
-    """
-    if not isinstance(repetitions, int) or repetitions <= 0:
-        raise ValueError('positive repetitions required')
-    bg = set(background)
-    groups = {g: [] for g in sorted(bg)}
-    ids = [r['row_id'] for r in records]
-    if len(ids) != len(set(ids)):
-        raise ValueError('Accepted row IDs must be unique, including duplicate records')
-    for r in records:
-        if r['gene'] not in bg:
-            raise ValueError('Accepted record lies outside frozen background')
-        groups[r['gene']].append(r)
-    specs, pools, target_ids = [], {}, []
-    for gene in sorted(bg):
-        target = [r['row_id'] for r in groups[gene] if r['evidence'] in EXPRESSION_CODES]
-        pool = [r['row_id'] for r in groups[gene] if r['evidence'] not in EXPRESSION_CODES]
-        k = len(target)
-        if k:
-            pools[gene] = (pool, k)
-            target_ids.extend(target)
-        specs.append({'gene': gene, 'target_rows': k, 'control_pool': len(pool),
-                      'removed_per_replicate': min(k, len(pool)),
-                      'shortfall_rows': max(0, k-len(pool)),
-                      'status': ('no_target' if not k else
-                                 ('shortfall_delete_all' if len(pool)<k else 'matched'))})
-    rng = np.random.default_rng(seed)
-    draws = []
-    for rep in range(repetitions):
-        removed = []
-        for gene in sorted(pools):
-            pool, k = pools[gene]
-            if len(pool) < k:
-                removed.extend(pool)
-            else:
-                selected = rng.choice(len(pool), size=k, replace=False)
-                removed.extend(pool[int(i)] for i in selected)
-        if len(removed) != len(set(removed)):
-            raise AssertionError('Repeated row within one deletion draw')
-        draws.append(sorted(removed))
-    total = len(target_ids)
-    actual = sum(s['removed_per_replicate'] for s in specs)
-    deficit = sum(s['shortfall_rows'] for s in specs)
-    assert actual + deficit == total
-    return {'kind': 'E4_A3_PRIMARY', 'replicates': repetitions, 'seed': seed,
-            'rng': 'numpy.random.default_rng', 'bit_generator': type(rng.bit_generator).__name__,
-            'numpy_version': np.__version__,
-            'traversal': 'replicate outer; gene_id lexicographic inner; ledger-order pool',
-            'shortfall_policy': 'delete_all_available_and_record_deficit; no_rng_draw',
-            'equal_pool_policy': 'choice_without_replacement',
-            'per_gene': specs, 'expression_row_ids': sorted(target_ids),
-            'control_row_ids': draws, 'target_total': total,
-            'removed_rows_per_replicate': actual, 'shortfall_rows_per_replicate': deficit,
-            'genes_with_shortfall': sum(s['shortfall_rows'] > 0 for s in specs),
-            'target_row_coverage': actual/total if total else None,
-            'status': 'ready' if total else 'no_target_expression_rows',
-            'independent_biological_replicates': 0}
-
-
-def validate_primary_plan(plan, records, background):
-    if plan.get('kind') != 'E4_A3_PRIMARY' or plan.get('seed') != PRIMARY_SEED or plan.get('replicates') != PRIMARY_REPLICATES:
-        raise ValueError('A3 specification drift')
-    expected = primary_control_plan(records, background)
-    if plan != expected:
-        raise ValueError('A3 row IDs, RNG environment, counts or shortfalls differ from lock')
-    return True
 
 
 class FragilityEngine:
@@ -153,7 +74,7 @@ class FragilityEngine:
         return tuple(sorted(q))
 
     def _tail(self, n, K, k):
-        """R10/E2-style exact memoization; no statistical approximation."""
+        """Exact hypergeometric upper tail with memoization; no approximation."""
         N=len(self.bg);K=np.asarray(K);k=np.asarray(k)
         if np.any((K<0)|(K>N)|(k<0)|(k>n)|(k>K)|(K-k>N-n)):
             raise ValueError('Invalid hypergeometric counts')
@@ -220,9 +141,8 @@ class FragilityEngine:
         supporting_pmids = [set() for _ in range(m)]
         no_pmid = np.zeros(m, dtype=np.int64)
         expression_only = np.zeros(m, dtype=np.int64)
-        specific_hep_only = np.zeros(m, dtype=np.int64)
         for g in self.query_set(query):
-            any_pmid, non_expression, other_than_specific_hep = set(), set(), set()
+            any_pmid, non_expression = set(), set()
             for r in self.rows[g]:
                 ix = self.term_ix[r['term']]
                 ids = pmids(r['references'])
@@ -232,17 +152,13 @@ class FragilityEngine:
                         supporting_pmids[j].update(ids)
                 if r['evidence'] not in EXPRESSION_CODES:
                     non_expression.update(ix)
-                if not (r['evidence'] == 'HEP' and HEP_SOURCE in r['references']):
-                    other_than_specific_hep.update(ix)
             if self.closed[g]:
                 no_pmid[list(self.closed[g] - any_pmid)] += 1
                 expression_only[list(self.closed[g] - non_expression)] += 1
-                specific_hep_only[list(self.closed[g] - other_than_specific_hep)] += 1
         return {'support_pmid_ids': [sorted(s) for s in supporting_pmids],
                 'support_pmids': np.asarray([len(s) for s in supporting_pmids], dtype=np.int64),
                 'only_no_pmid_hit_genes': no_pmid,
-                'only_IEP_HEP_hit_genes': expression_only,
-                'only_target_HEP_hit_genes': specific_hep_only}
+                'only_IEP_HEP_hit_genes': expression_only}
 
     def evaluate(self, query, alpha=.05, source_sink: Callable | None = None):
         q = self.query_set(query)
@@ -253,12 +169,17 @@ class FragilityEngine:
         sig = np.flatnonzero(base['q'] <= alpha)
         candidates = self.candidates(q)
         killers = [[] for _ in self.family]
+        # direct: the deletion removes at least one query hit of the term (k drops);
+        # via_bh: the deletion removes none of the term's query hits (k unchanged; K may drop), and the
+        # term is lost through the BH re-adjustment of the family.
+        killers_direct = [[] for _ in self.family]
+        killers_via_bh = [[] for _ in self.family]
         source_counts, identity_count = {}, 0
         # Record every candidate, including closures with no change.
         qset=set(q)
         for source in candidates:
             delta=self.source_delta(source)
-            # With no requested score stream, use the same safe screening as E2:
+            # With no requested score stream, skip sources that remove no query hit:
             # no query family hit can be lost => p/q can only stay/decrease.
             # Still record the candidate and its exact zero-killer outcome.
             if source_sink is None and (not len(sig) or not (qset & delta[0].keys())):
@@ -269,6 +190,10 @@ class FragilityEngine:
             lost_terms = sig[exact['q'][sig] > alpha]
             for j in lost_terms:
                 killers[int(j)].append(source)
+                if exact['k'][j] < base['k'][j]:
+                    killers_direct[int(j)].append(source)
+                else:
+                    killers_via_bh[int(j)].append(source)
             source_counts[source] = len(lost_terms)
             identity_count += int(not len(self.source_delta(source)[1]))
             if source_sink is not None:
@@ -285,7 +210,8 @@ class FragilityEngine:
                 'candidate_pmids': candidates, 'candidate_count': len(candidates),
                 'candidate_identity_count': identity_count,
                 'query_accepted_rows_without_pmid': no_pmid_rows,
-                'killers': killers, 'fragile1': fragile, 'support': support,
+                'killers': killers, 'killers_direct': killers_direct, 'killers_via_bh': killers_via_bh,
+                'fragile1': fragile, 'support': support,
                 'baseline_significant': len(sig), 'fragile1_count': int(fragile.sum()),
                 'fragile1_fraction': float(fragile.sum()/len(sig)) if len(sig) else None,
                 'top_term': self.family[order[0]] if order else None,
@@ -293,21 +219,6 @@ class FragilityEngine:
                 'top10_count': len(top), 'top10_fragile1': int(fragile[top].sum()),
                 'single_pmids_killing_all_significant': all_killers,
                 'source_killed_counts': source_counts}
-
-
-def iep_composition(records, names):
-    rows = [r for r in records if r['evidence']=='IEP']
-    counts = Counter(r['term'] for r in rows)
-    missing = sorted(t for t in counts if t not in names)
-    if missing:
-        raise ValueError('Direct term names missing for IEP composition: '+repr(missing[:5]))
-    n_response = sum(names[r['term']].startswith(('response to','cellular response to')) for r in rows)
-    return {'scope':'accepted IEP rows mapped to frozen measured background; direct terms, not ancestors',
-            'IEP_rows':len(rows), 'response_prefix_rows':n_response,
-            'response_prefix_fraction':n_response/len(rows) if rows else None,
-            'top20_direct_terms':[{'term':t,'term_name':names[t],'rows':c}
-                                  for t,c in sorted(counts.items(),key=lambda kv:(-kv[1],kv[0]))[:20]],
-            'descriptive_only':True}
 
 
 def delta_for_row_ids(engine, remove_ids):

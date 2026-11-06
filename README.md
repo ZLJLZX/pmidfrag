@@ -5,20 +5,29 @@ which publications the result stands on:
 
 | Output column | Meaning |
 |---|---|
-| `support_pmids` | distinct PMIDs that support the query hits of the term (after ontology propagation) |
+| `support_pmids` | the distinct PMIDs that support the query hits of the term after ontology propagation (`;`-separated); `n_support_pmids` is their number |
+| `hits_without_pmid` | number of query hits of the term supported only by annotations that cite no PMID (e.g. `GO_REF` rows); no publication deletion can remove them |
 | `single_pmid_dependent` | removing all annotations citing **one** PMID (anywhere in the background) makes the term non-significant |
-| `killer_pmids` | the PMIDs with that property |
-| `fragility_index` | minimum number of PMIDs whose removal makes the term non-significant (greedy, exact for 1, `>5` if more than 5) |
-| `evidence_concentration` | largest share of the term's query hits attributable to a single PMID |
+| `killer_pmids` | the PMIDs with that property, split into `killer_pmids_direct` (the deletion removes at least one query hit of the term) and `killer_pmids_via_bh` (the deletion removes none of the term's query hits; the term is lost through the BH re-adjustment of the family) |
+| `fragility_index`, `fi_status` | number of PMIDs whose joint removal makes the term non-significant, from a greedy search (below) |
+| `greedy_removal_set` | the PMIDs removed by the greedy search |
+| `evidence_concentration` | largest share of the term's query hits removed by deleting a single PMID |
 | `hits_only_IEP_HEP` | query hits supported only by expression-pattern evidence (IEP/HEP) |
 | `q_without_IEP_HEP` | BH-adjusted p after dropping IEP/HEP annotations |
 
 All deletions act on the whole background, closures are recomputed and the full fixed term family is re-adjusted with BH,
 so the numbers are exact for the declared annotation table, not approximations.
 
-**What it is not.** Dependence on one publication is a pointer to what to re-read; it is not an error flag. In our
-evaluations it does not predict whether a term replicates in an independent dataset (replication was governed by the
-q-value margin), and expression-evidence circularity was absent in the test case. Use it to decide where to look.
+**Fragility index.** FI 1 is exact (single-publication dependence is tested for every candidate PMID). For other
+terms a greedy search removes, one at a time, the PMID that raises the term's q most, choosing among the (at most 30)
+PMIDs whose deletion on its own changes the term's counts. `fi_status` is `exact` for FI 1 and 2, `upper_bound` for
+FI 3-5, `not_abolished_after_5` when five removals leave the term significant, and
+`not_abolished_shortlist_exhausted` when fewer than five such PMIDs exist. The last two are not bounds: PMIDs that
+change the term's counts only jointly (hits supported by two or more publications) are not searched.
+
+**What it is not.** Dependence on one publication is a pointer to what to re-read; it is not an error flag. In the
+evaluations of the accompanying article, dependent terms were no more likely than terms with similar q values to fail
+replication in independent cohorts or to be lost after annotation updates. Use it to decide where to look.
 
 ## Install
 
@@ -46,7 +55,7 @@ pmidfrag --gaf HUMAN-uniprot.gaf.gz --ontology go-basic.json \
   `--no-part-of`, `--min-size`, `--max-size`.
 
 Outputs: `significant_terms.csv`, `all_terms.csv.gz`, `summary.json` (with input SHA-256 and QC ledger), `report.html`,
-`ledger.jsonl.gz` (every accepted GAF row with evidence code and references).
+`ledger.jsonl.gz` (every GAF row with its inclusion or exclusion reason, evidence code and references).
 
 ## Reference run
 
@@ -57,9 +66,17 @@ SHA-256 values, runs `pmidfrag` and checks the output against the reference tabl
 ## Tests
 
 ```bash
-python -m pytest -q tests/              # synthetic end-to-end test
+python -m pytest -q tests/              # synthetic end-to-end tests with known answers
 bash examples/airway/run_airway.sh      # real-data regression (downloads ~83 MB)
 ```
+
+## Changes
+
+- 0.1.1: per-term supporting-PMID lists and hits without PMID support; killer PMIDs split into direct and BH-only;
+  `fi_status` for every fragility index; FI threshold follows `--alpha`; more tests; study-specific helpers removed.
+  Significance, dependence flags, killer PMIDs and fragility-index values are unchanged from 0.1.0 at the default
+  `--alpha`; the former `>5` label is now an empty value with its `fi_status`.
+- 0.1.0: first release.
 
 ## Citation
 

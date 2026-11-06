@@ -2,19 +2,29 @@
 
 Inputs: a GAF (2.1/2.2), a GO JSON ontology (go-basic.json[.gz]), a background gene list, a query gene list,
 and (unless genes are the GAF object identifiers themselves) a two-column mapping TSV `accession<TAB>gene`.
-Outputs: per-term CSV with q, support PMIDs, single-publication dependence, fragility index, evidence
-concentration, q after dropping IEP/HEP; JSON summary; a self-contained HTML report.
+Outputs: per-term CSV with q, the supporting PMIDs, query hits without PMID support, single-publication
+dependence (killer PMIDs split into direct and BH-only), fragility index with its status, evidence
+concentration and q after dropping IEP/HEP; JSON summary; a self-contained HTML report.
 """
 from __future__ import annotations
 import argparse, csv, gzip, hashlib, html, json, re, sys, time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 import numpy as np
+from . import __version__
 from .core import load_ontology, closure, hit_counts, bh, sha256
 from .ledger import build_ledger, EXPRESSION_CODES
 from .engine import FragilityEngine, pmids
 
 ISO = re.compile(r'-\d+$')
+FI_STEPS = 5
+FIELDS = ['rank', 'term', 'name', 'q', 'p', 'K', 'k', 'n_support_pmids', 'support_pmids', 'hits_without_pmid',
+          'single_pmid_dependent', 'killer_pmids', 'killer_pmids_direct', 'killer_pmids_via_bh',
+          'fragility_index', 'fi_status', 'greedy_removal_set', 'evidence_concentration',
+          'hits_only_IEP_HEP', 'q_without_IEP_HEP']
+NOTE = ('Each row is a significant term. Deleting a PMID removes every annotation that cites it from the whole '
+        'background, recomputes propagation and re-applies BH to the fixed term family. Single-publication '
+        'dependence marks the publications a term rests on; it does not by itself show that an annotation is wrong.')
 
 def read_list(p):
     return [l.strip() for l in Path(p).read_text(encoding='utf-8').splitlines() if l.strip() and not l.startswith('#')]
@@ -32,7 +42,15 @@ def load_p2g(mapping, background):
             genes_of[ISO.sub('', acc.strip().removeprefix('UniProtKB:'))].add(gene.strip())
     return {a: next(iter(gs)) for a, gs in genes_of.items() if len(gs) == 1 and next(iter(gs)) in bg}
 
-def fragility_index(engine, query, base_q, i, shortlist, max_steps=5):
+def fragility_index(engine, query, base_q, i, shortlist, max_steps=FI_STEPS, alpha=0.05):
+    """Greedy search for the fewest PMIDs whose joint deletion makes term i non-significant.
+
+    Called only for terms that no single deletion abolishes. Each step deletes the shortlisted PMID that raises
+    q_i most. Returns (fi, removed, status): 'exact' for fi == 2 (single deletions are known not to suffice),
+    'upper_bound' for fi 3..max_steps, and fi None with 'not_abolished_after_<max_steps>' or
+    'not_abolished_shortlist_exhausted' (fewer than max_steps shortlisted PMIDs). Neither of the last two is a
+    bound: PMIDs that change the term's counts only jointly (redundant support) are not shortlisted.
+    """
     removed = []; cache = {}
     def q_after(rem):
         key = tuple(sorted(rem))
@@ -53,10 +71,12 @@ def fragility_index(engine, query, base_q, i, shortlist, max_steps=5):
             if s in removed: continue
             r = q_after(removed + [s])
             if best is None or r[i] > best[1][i]: best = (s, r)
-        if best is None: break
+        if best is None:
+            return None, removed, 'not_abolished_shortlist_exhausted'
         removed.append(best[0])
-        if best[1][i] > 0.05: return len(removed), removed
-    return None, removed
+        if best[1][i] > alpha:
+            return len(removed), removed, ('exact' if len(removed) <= 2 else 'upper_bound')
+    return None, removed, 'not_abolished_after_%d' % max_steps
 
 def run(args):
     t0 = time.perf_counter(); out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
@@ -78,6 +98,7 @@ def run(args):
     engine = FragilityEngine(rows, bg, ont.ancestors, family)
     res = engine.evaluate(query, args.alpha, source_sink=lambda *_: None)
     base = res['baseline']; sig = res['baseline_significant_indices']; qs = engine.query_set(query)
+    sup = res['support']
     # evidence concentration and expression-evidence exclusion
     maxlost = np.zeros(len(family), dtype=np.int64)
     for s in res['candidate_pmids']:
@@ -96,49 +117,61 @@ def run(args):
             if i in set(ix.tolist()):
                 per.append((sum(1 for g in qs if g in lost and i in set(lost[g].tolist())), s))
         per.sort(reverse=True); shortlist = [s for _, s in per[:30]]
-        fi, removed = (1, res['killers'][i][:1]) if res['fragile1'][i] else fragility_index(engine, query, base['q'], i, shortlist)
+        if res['fragile1'][i]:
+            fi, removed, status = 1, res['killers'][i][:1], 'exact'
+        else:
+            fi, removed, status = fragility_index(engine, query, base['q'], i, shortlist, alpha=args.alpha)
         table.append({'rank': rank, 'term': family[i], 'name': ont.names.get(family[i], family[i]),
                       'q': float(base['q'][i]), 'p': float(base['p'][i]), 'K': int(base['K'][i]), 'k': int(base['k'][i]),
-                      'support_pmids': int(res['support']['support_pmids'][i]),
+                      'n_support_pmids': int(sup['support_pmids'][i]), 'support_pmids': ';'.join(sup['support_pmid_ids'][i]),
+                      'hits_without_pmid': int(sup['only_no_pmid_hit_genes'][i]),
                       'single_pmid_dependent': bool(res['fragile1'][i]), 'killer_pmids': ';'.join(res['killers'][i]),
-                      'fragility_index': fi if fi is not None else '>5', 'greedy_removal_set': ';'.join(removed),
+                      'killer_pmids_direct': ';'.join(res['killers_direct'][i]),
+                      'killer_pmids_via_bh': ';'.join(res['killers_via_bh'][i]),
+                      'fragility_index': '' if fi is None else fi, 'fi_status': status,
+                      'greedy_removal_set': ';'.join(removed),
                       'evidence_concentration': float(maxlost[i]/base['k'][i]) if base['k'][i] else 0.0,
-                      'hits_only_IEP_HEP': int(res['support']['only_IEP_HEP_hit_genes'][i]),
+                      'hits_only_IEP_HEP': int(sup['only_IEP_HEP_hit_genes'][i]),
                       'q_without_IEP_HEP': float(E['q'][i])})
     with open(out/'significant_terms.csv', 'w', newline='', encoding='utf-8') as f:
-        w = csv.DictWriter(f, fieldnames=list(table[0]) if table else ['rank']); w.writeheader(); w.writerows(table)
+        w = csv.DictWriter(f, fieldnames=FIELDS); w.writeheader(); w.writerows(table)
     with gzip.open(out/'all_terms.csv.gz', 'wt', newline='', encoding='utf-8') as f:
         w = csv.writer(f); w.writerow(['term', 'name', 'K', 'k', 'p', 'q', 'q_without_IEP_HEP'])
         for i, t in enumerate(family): w.writerow([t, ont.names.get(t, t), int(base['K'][i]), int(base['k'][i]), float(base['p'][i]), float(base['q'][i]), float(E['q'][i])])
-    summary = {'tool': 'pmidfrag', 'inputs': {'gaf': str(args.gaf), 'gaf_sha256': sha256(args.gaf), 'ontology': str(args.ontology),
+    summary = {'tool': 'pmidfrag', 'version': __version__,
+               'inputs': {'gaf': str(args.gaf), 'gaf_sha256': sha256(args.gaf), 'ontology': str(args.ontology),
                'ontology_sha256': sha256(args.ontology), 'background_genes': len(background), 'background_used': len(bg),
                'query_genes': len(query_in), 'query_used': len(query), 'query_unmapped': unmapped,
                'relations': args.relations.split(','), 'db': args.db, 'taxon': args.taxon, 'family_size_bounds': [args.min_size, args.max_size], 'alpha': args.alpha},
                'ledger_qc': ledger_qc, 'family_size': len(family), 'candidate_pmids': res['candidate_count'],
                'query_rows_without_pmid': res['query_accepted_rows_without_pmid'],
                'significant_terms': len(sig), 'single_pmid_dependent_terms': int(res['fragile1_count']),
+               'single_pmid_dependent_terms_via_bh_only': sum(1 for i in sig if res['killers'][i] and not res['killers_direct'][i]),
                'top10_single_pmid_dependent': res['top10_fragile1'], 'single_pmids_killing_all': res['single_pmids_killing_all_significant'],
+               'fi_status_counts': dict(sorted(Counter(r['fi_status'] for r in table).items())),
                'terms_lost_without_IEP_HEP': int(sum(E['q'][i] > args.alpha for i in sig)),
-               'seconds': time.perf_counter() - t0,
-               'interpretation': 'Dependence on one publication marks what to re-read; it is not an error flag and does not predict replication.'}
+               'seconds': time.perf_counter() - t0}
     (out/'summary.json').write_text(json.dumps(summary, indent=1, ensure_ascii=False))
     write_html(out/'report.html', summary, table)
     print(json.dumps({k: v for k, v in summary.items() if k not in ('ledger_qc', 'inputs')}, ensure_ascii=False, indent=1))
     return 0
 
 def write_html(path, summary, table):
-    cols = ['rank', 'term', 'name', 'q', 'k', 'K', 'support_pmids', 'single_pmid_dependent', 'fragility_index', 'evidence_concentration', 'q_without_IEP_HEP', 'killer_pmids']
+    cols = ['rank', 'term', 'name', 'q', 'k', 'K', 'n_support_pmids', 'hits_without_pmid', 'single_pmid_dependent',
+            'killer_pmids_direct', 'killer_pmids_via_bh', 'fragility_index', 'fi_status', 'evidence_concentration',
+            'q_without_IEP_HEP', 'support_pmids']
     rows = ''.join('<tr>' + ''.join(f'<td>{html.escape(str(r[c]))}</td>' for c in cols) + '</tr>' for r in table)
     s = {k: v for k, v in summary.items() if k not in ('ledger_qc', 'inputs')}
     page = f"""<!doctype html><html lang="en"><meta charset="utf-8"><title>pmidfrag report</title>
 <style>body{{font:15px system-ui;margin:2em;max-width:1200px}}table{{border-collapse:collapse;font-size:13px}}td,th{{border:1px solid #bbb;padding:4px 6px}}th{{background:#eee;position:sticky;top:0}}</style>
 <h1>pmidfrag: provenance audit of GO over-representation</h1>
-<p>{html.escape(summary['interpretation'])}</p><pre>{html.escape(json.dumps(s, indent=1, ensure_ascii=False))}</pre>
+<p>{html.escape(NOTE)}</p><pre>{html.escape(json.dumps(s, indent=1, ensure_ascii=False))}</pre>
 <table><thead><tr>{''.join(f'<th>{c}</th>' for c in cols)}</tr></thead><tbody>{rows}</tbody></table></html>"""
     path.write_text(page, encoding='utf-8')
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='pmidfrag', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--version', action='version', version='pmidfrag ' + __version__)
     ap.add_argument('--gaf', required=True); ap.add_argument('--ontology', required=True)
     ap.add_argument('--background', required=True, help='one gene id per line (measured genes)')
     ap.add_argument('--query', required=True, help='one gene id per line; must be within background')

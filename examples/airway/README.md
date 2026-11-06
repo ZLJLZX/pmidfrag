@@ -18,7 +18,8 @@ bash examples/airway/run_airway.sh
 
 The script downloads `HUMAN-uniprot.gaf.gz` and `go-basic.json` from the GO 2026-06-19 release, verifies their
 SHA-256 values, runs `pmidfrag` and compares the output with `expected_terms_up.csv.gz`. Expected summary:
-family 6,462 terms; 1,070 candidate PMIDs; 18 significant terms; 8 single-publication dependent; 2 of the top 10
-dependent; no PMID abolishes all terms; no term lost without IEP/HEP. The comparison checks K, k, q and q without
+family 6,462 terms; 1,070 candidate PMIDs; 18 significant terms; 8 single-publication dependent (1 only through the
+BH re-adjustment); 2 of the top 10 dependent; no PMID abolishes all terms; no term lost without IEP/HEP; FI status
+10 exact, 1 upper bound, 1 not abolished after five removals, 6 with the shortlist exhausted. The comparison checks K, k, q and q without
 IEP/HEP for every term (tolerance 1e-12) and dependence flags, killer PMIDs, support counts and ranks for the
-significant terms. `python examples/airway/check_regression.py <out> --tamper` must report FAIL (negative control).
+significant terms, plus the internal consistency of the supporting-PMID lists, the killer split and the FI status. `python examples/airway/check_regression.py <out> --tamper` must report FAIL (negative control).

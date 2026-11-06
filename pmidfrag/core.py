@@ -1,10 +1,5 @@
-"""Task-specific provenance bounds for fixed-family overrepresentation analysis.
-
-These are bounds over explicitly allowed annotation tables, NOT confidence
-intervals, biological truth certificates, or a new FDR-control procedure.
-"""
+"""GO biological-process ontology loading, propagation, hypergeometric tail and BH adjustment."""
 from __future__ import annotations
-# Lineage: R11 robust_core (hypergeometric tail, BH, ontology projection), unchanged apart from this note.
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
@@ -13,8 +8,6 @@ from typing import Iterable
 import gzip, hashlib, json, re
 import numpy as np
 from scipy.stats import hypergeom
-
-UNKNOWN_REF = "urn:r11:unrecorded-reference"  # metadata flag, never a publication
 
 
 def sha256(path: str | Path) -> str:
@@ -105,73 +98,9 @@ def closure(terms: Iterable[str], ancestors: dict[str,frozenset[str]]) -> frozen
     return frozenset(s)
 
 
-def scenarios(rows, genes, ancestors, source):
-    """References must be nonempty or use UNKNOWN_REF to preserve uncertainty."""
-    old, exact, lower, upper = {}, {}, {}, {}
-    for g in genes:
-        rs=rows.get(g, [])
-        if any(not r for _,r in rs): raise ValueError('Empty reference set: record missingness explicitly.')
-        refs=set().union(*(r for _,r in rs)) if rs else set()
-        old[g]=closure((t for t,_ in rs),ancestors)
-        exact[g]=closure((t for t,r in rs if source not in r),ancestors)
-        lower[g]=frozenset() if source in refs else old[g]
-        upper[g]=frozenset() if refs == {source} else old[g]
-        if not lower[g] <= exact[g] <= upper[g]: raise AssertionError('Annotation envelope failed.')
-    return old,exact,lower,upper
-
-
 def hit_counts(closed, genes, term_index):
     a=np.zeros(len(term_index),dtype=np.int64)
     for g in genes:
         ix=[term_index[t] for t in closed[g] if t in term_index]
         a[ix]+=1
     return a
-
-
-def analyze(rows, genes, query, ancestors, family, source, alpha=.05, guard=1e-12):
-    genes=tuple(sorted(set(genes))); query=tuple(sorted(set(query)))
-    if not set(query) <= set(genes): raise ValueError('Query is not a subset of frozen background.')
-    if not query: raise ValueError('Empty query: report not_tested, not a successful negative result.')
-    if not family or len(family)!=len(set(family)): raise ValueError('Nonempty unique fixed family required.')
-    ti={t:i for i,t in enumerate(family)}
-    N,n=len(genes),len(query)
-    old,exact,lower,upper=scenarios(rows,genes,ancestors,source)
-    Ks=[hit_counts(s,genes,ti) for s in (old,exact,lower,upper)]
-    ks=[hit_counts(s,query,ti) for s in (old,exact,lower,upper)]
-    Ko,Ke,Kl,Ku=Ks; ko,ke,al,au=ks
-    bl,bu=Kl-al,Ku-au
-    po=tail(N,n,Ko,ko); pe=tail(N,n,Ke,ke)
-    pl=tail(N,n,au+bl,au); pu=tail(N,n,al+bu,al)
-    qo,qe,ql,qu=map(bh,(po,pe,pl,pu))
-    qblank=bh(tail(N,n,Kl,al))
-    if np.any(pl>pe+guard) or np.any(pe>pu+guard) or np.any(ql>qe+guard) or np.any(qe>qu+guard):
-        raise AssertionError('Numerical envelope containment failed.')
-    sig=qu < alpha-guard; no=ql > alpha+guard
-    status=np.full(len(family),'unresolved',dtype='<U24')
-    status[sig]='robust_significant';status[no]='robust_nonsignificant'
-    eo,ee=qo<=alpha,qe<=alpha
-    false=int(np.sum(sig & ~ee)+np.sum(no & ee))
-    if false: raise AssertionError('A definitive call contradicts exact row-filter reanalysis.')
-    interest=eo|ee
-    unresolved=~(sig|no)
-    guard_only=unresolved & (ql==qu)
-    denom=lambda a,b: float(a/b) if b else None
-    summary={
-      'N':N,'n':n,'family_size':len(family),'source':source,
-      'baseline_significant':int(eo.sum()),'exact_significant':int(ee.sum()),
-      'unchanged_baseline_disagreements':int((eo!=ee).sum()),
-      'blanket_drop_disagreements':int(((qblank<=alpha)!=ee).sum()),
-      'robust_significant':int(sig.sum()),'robust_nonsignificant':int(no.sum()),
-      'unresolved':int(unresolved.sum()),'unresolved_zero_width_threshold_guard':int(guard_only.sum()),
-      'unresolved_nonzero_interval':int((unresolved & ~guard_only).sum()),'false_definitive':false,
-      'significant_union':int(interest.sum()),'unresolved_significant_union':int((~(sig|no)&interest).sum()),
-      'robust_retention_of_exact_significant':denom(sig.sum(),ee.sum()),
-      'unresolved_fraction_significant_union':denom((~(sig|no)&interest).sum(),interest.sum()),
-      'abstain_all_unresolved':len(family),
-      'source_affected_genes':sum(any(source in r for _,r in rows.get(g,[])) for g in genes),
-      'clinical_or_causal_validation':False,
-    }
-    arrays=dict(p_baseline=po,q_baseline=qo,p_exact=pe,q_exact=qe,p_lower=pl,p_upper=pu,
-                q_lower=ql,q_upper=qu,q_blanket=qblank,K_baseline=Ko,k_baseline=ko,
-                K_exact=Ke,k_exact=ke,a_lower=al,a_upper=au,b_lower=bl,b_upper=bu,interval_width_zero=(ql==qu),status=status)
-    return arrays,summary
